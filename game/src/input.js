@@ -1,48 +1,98 @@
-// Keyboard and mouse: WASD/arrows to move, Shift to sneak, 1/2/3 for tools,
-// click to throw a decoy coin at the mouse position, Enter to start, R to restart.
+// Keyboard and mouse input: key state plus a canvas click slot.
+
+// Fresh input state: all movement flags off, no click stored.
 export function createInput() {
-  return {
-    up: false, down: false, left: false, right: false, sneak: false,
-    click: null, // {x, y} in canvas pixels, consumed by the loop
-  };
+  return { up: false, down: false, left: false, right: false, sneak: false, click: null };
 }
 
-const KEYMAP = {
-  KeyW: 'up', ArrowUp: 'up',
-  KeyS: 'down', ArrowDown: 'down',
-  KeyA: 'left', ArrowLeft: 'left',
-  KeyD: 'right', ArrowRight: 'right',
-};
-
-export function attachInput(input, canvas, handlers) {
-  window.addEventListener('keydown', (event) => {
-    const mapped = KEYMAP[event.code];
-    if (mapped) {
-      input[mapped] = true;
-      event.preventDefault();
+// Wire keyboard and mouse listeners onto the canvas. Handlers:
+// smoke, emp, decoy (key 3), enter, restart.
+export function installInput(input, canvas, handlers) {
+  window.addEventListener('keydown', (e) => {
+    switch (e.code) {
+      case 'KeyW':
+      case 'ArrowUp':
+        input.up = true;
+        e.preventDefault();
+        break;
+      case 'KeyS':
+      case 'ArrowDown':
+        input.down = true;
+        e.preventDefault();
+        break;
+      case 'KeyA':
+      case 'ArrowLeft':
+        input.left = true;
+        e.preventDefault();
+        break;
+      case 'KeyD':
+      case 'ArrowRight':
+        input.right = true;
+        e.preventDefault();
+        break;
+      case 'ShiftLeft':
+      case 'ShiftRight':
+        input.sneak = true;
+        break;
+      case 'Digit1':
+        handlers.smoke();
+        break;
+      case 'Digit2':
+        handlers.emp();
+        break;
+      case 'Digit3':
+        handlers.decoy();
+        break;
+      case 'Enter':
+        handlers.enter();
+        break;
+      case 'KeyR':
+        handlers.restart();
+        break;
+      default:
+        break;
     }
-    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') input.sneak = true;
-    if (event.code === 'Digit1') handlers.onSmoke();
-    if (event.code === 'Digit2') handlers.onEmp();
-    if (event.code === 'Digit3') handlers.onDecoyKey();
-    if (event.code === 'Enter') handlers.onEnter();
-    if (event.code === 'KeyR') handlers.onRestart();
   });
-  window.addEventListener('keyup', (event) => {
-    const mapped = KEYMAP[event.code];
-    if (mapped) input[mapped] = false;
-    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') input.sneak = false;
+
+  window.addEventListener('keyup', (e) => {
+    switch (e.code) {
+      case 'KeyW':
+      case 'ArrowUp':
+        input.up = false;
+        break;
+      case 'KeyS':
+      case 'ArrowDown':
+        input.down = false;
+        break;
+      case 'KeyA':
+      case 'ArrowLeft':
+        input.left = false;
+        break;
+      case 'KeyD':
+      case 'ArrowRight':
+        input.right = false;
+        break;
+      case 'ShiftLeft':
+      case 'ShiftRight':
+        input.sneak = false;
+        break;
+      default:
+        break;
+    }
   });
-  canvas.addEventListener('mousedown', (event) => {
+
+  canvas.addEventListener('click', (e) => {
     const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    input.click = {
-      x: (event.clientX - rect.left) * scaleX,
-      y: (event.clientY - rect.top) * scaleY,
-    };
+    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    input.click = { x, y };
   });
+
   window.addEventListener('blur', () => {
-    input.up = input.down = input.left = input.right = input.sneak = false;
+    input.up = false;
+    input.down = false;
+    input.left = false;
+    input.right = false;
+    input.sneak = false;
   });
 }

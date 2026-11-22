@@ -1,123 +1,153 @@
-// The screenshot scenes behind ?shot=cover|route|caught|getaway. Each one
-// plays the real rules forward from a fresh world, walking the thief along
-// a real route with the game's own step function, then stages the alarm and
-// the watchers so the frame shows what a short game really looks like.
-// The same seed always gives the same frame.
+// Screenshot scenes: play the real game from a fresh world, then
+// freeze one frame. Scene names: sampul, rute, tertangkap, pelarian.
+// Any other name is treated as sampul.
+
 import { STEP } from './config.js';
-import { resetWorld, stepWorld, useEmp, SCREEN_PLAY } from './world.js';
+import { resetWorld, stepWorld, useEmp, SCREEN_PLAYING } from './world.js';
 
-const EMPTY_INPUT = { up: false, down: false, left: false, right: false, sneak: false };
+// Walk the thief toward a target in two axis-aligned phases, first
+// horizontal then vertical, using synthetic input and fixed steps.
+// The two phases share one time budget (default 40 s). A phase ends
+// when the thief is within 10 px on that axis. The alarm is held at
+// 20 during setup, and walking stops entirely if the world leaves the
+// playing screen. If a phase stops making progress (the thief is
+// pressed dead-centre against an obstacle), the thief steps sideways
+// briefly to slide around it, keeping the same sideways direction
+// until the phase moves again — that is how it rounds long walls such
+// as the service-corridor divider — and only flips sideways when the
+// sideways step itself is blocked.
+export function walkTo(world, target, maxTime = 40) {
+  const budget = { left: maxTime };
+  walkAxis(world, 'x', target.x, budget);
+  walkAxis(world, 'y', target.y, budget);
+}
 
-// Walk the thief to `target` in two axis-aligned phases (x, then y), which
-// slides along walls instead of wedging into corners. The alarm is held
-// down while staging so a staged walk is never caught mid-scene.
-function walkTo(world, target, maxSeconds = 40) {
-  const steps = Math.floor(maxSeconds / STEP);
-  for (let phase = 0; phase < 2; phase += 1) {
-    for (let index = 0; index < steps; index += 1) {
-      const thief = world.thief;
-      const dx = target.x - thief.x;
-      const dy = target.y - thief.y;
-      const input = { ...EMPTY_INPUT };
-      if (phase === 0) {
-        if (Math.abs(dx) < 10) break;
-        input.left = dx < 0;
-        input.right = dx > 0;
-      } else {
-        if (Math.abs(dy) < 10) break;
-        input.up = dy < 0;
-        input.down = dy > 0;
-      }
-      stepWorld(world, input, STEP);
-      if (world.screen !== SCREEN_PLAY) return;
-      if (world.alarm > 20) world.alarm = 20;
+function walkAxis(world, axis, target, budget) {
+  const input = { up: false, down: false, left: false, right: false, sneak: false, click: null };
+  let best = Infinity;
+  let sinceBest = 0;
+  let sideDir = 1;
+  while (budget.left > 0 && world.screen === SCREEN_PLAYING) {
+    const cur = axis === 'x' ? world.thief.x : world.thief.y;
+    const dist = Math.abs(target - cur);
+    if (dist < 10) return;
+    if (dist < best - 0.01) {
+      best = dist;
+      sinceBest = 0;
+    } else {
+      sinceBest += STEP;
     }
+    input.up = false;
+    input.down = false;
+    input.left = false;
+    input.right = false;
+    if (sinceBest > 0.6) {
+      // Sidestep perpendicular to the phase axis for half a second.
+      const perpBefore = axis === 'x' ? world.thief.y : world.thief.x;
+      if (axis === 'x') {
+        input.up = sideDir < 0;
+        input.down = sideDir > 0;
+      } else {
+        input.left = sideDir < 0;
+        input.right = sideDir > 0;
+      }
+      let burst = 0;
+      while (burst < 0.5 && budget.left > 0 && world.screen === SCREEN_PLAYING) {
+        stepWorld(world, input, STEP);
+        world.alarm = 20;
+        budget.left -= STEP;
+        burst += STEP;
+      }
+      const perpAfter = axis === 'x' ? world.thief.y : world.thief.x;
+      if (Math.abs(perpAfter - perpBefore) < 10) sideDir = -sideDir;
+      sinceBest = 0;
+      continue;
+    }
+    if (axis === 'x') {
+      input.left = target < cur;
+      input.right = target > cur;
+    } else {
+      input.up = target < cur;
+      input.down = target > cur;
+    }
+    stepWorld(world, input, STEP);
+    world.alarm = 20;
+    budget.left -= STEP;
   }
 }
 
-function faceGuardAt(guard, x, y) {
+// Face a guard at one point, freeze it there for 99 seconds and clear
+// any investigation task.
+export function pointGuardAt(guard, x, y) {
   guard.angle = Math.atan2(y - guard.y, x - guard.x);
   guard.baseAngle = guard.angle;
-  guard.pause = 99;
   guard.sweepPhase = 0;
+  guard.pauseLeft = 99;
   guard.investigate = null;
+  guard.investigateLeft = 0;
 }
 
-function placeGuard(guard, x, y) {
+// Move a guard to one position, frozen for 99 seconds with no
+// investigation task.
+export function placeGuard(guard, x, y) {
   guard.x = x;
   guard.y = y;
+  guard.pauseLeft = 99;
   guard.investigate = null;
-  guard.pause = 99;
-  guard.sweepPhase = 0;
+  guard.investigateLeft = 0;
 }
 
-// Cover: the thief crosses the main hall on the red carpet while Guard Mara's
-// cone sweeps onto them, a camera cone crosses the hall, the diamond glows
-// in the vault and the alarm meter reads 34% — everything in one frame.
-function stageCover(world) {
-  walkTo(world, { x: 150, y: 560 });
-  walkTo(world, { x: 300, y: 640 });
-  walkTo(world, { x: 395, y: 500 });
-  walkTo(world, { x: 560, y: 460 });
-  const mara = world.level.guards[0];
-  placeGuard(mara, 660, 380);
-  faceGuardAt(mara, world.thief.x, world.thief.y);
-  mara.seenFlash = 0.3;
-  const hallCam = world.level.cameras[1];
-  hallCam.angle = Math.atan2(world.thief.y - hallCam.y, world.thief.x - hallCam.x);
-  hallCam.phase = 0;
-  world.alarm = 34;
-  world.time = 42;
-}
-
-// Route: the thief slips down the east service corridor after an EMP pulse,
-// cameras offline, a pearl loot gem ahead, alarm nearly calm.
-function stageRoute(world) {
-  walkTo(world, { x: 700, y: 700 });
-  walkTo(world, { x: 1100, y: 700 });
-  walkTo(world, { x: 1210, y: 640 });
-  walkTo(world, { x: 1210, y: 560 });
-  world.coins = 40;
-  useEmp(world);
-  world.alarm = 12;
-  world.time = 58;
-}
-
-// Caught moment: the thief is inside Guard Mara's cone in the main hall,
-// the alarm meter is at 86% and a camera has them too.
-function stageCaught(world) {
-  walkTo(world, { x: 300, y: 640 });
-  walkTo(world, { x: 700, y: 640 });
-  walkTo(world, { x: 700, y: 300 });
-  const mara = world.level.guards[0];
-  placeGuard(mara, 620, 300);
-  faceGuardAt(mara, world.thief.x, world.thief.y);
-  mara.seenFlash = 0.3;
-  const hallCam = world.level.cameras[1];
-  hallCam.angle = Math.atan2(world.thief.y - hallCam.y, world.thief.x - hallCam.x);
-  world.alarm = 86;
-  world.time = 73;
-}
-
-// Getaway: the thief takes the Sunset Diamond through the vault's north door,
-// slips out the east door and reaches the EXIT — the win screen, real play.
-function stageGetaway(world) {
-  walkTo(world, { x: 300, y: 640 });
-  walkTo(world, { x: 700, y: 640 });
-  walkTo(world, { x: 700, y: 180 });
-  walkTo(world, { x: 930, y: 180 });
-  walkTo(world, { x: 930, y: 382 });
-  walkTo(world, { x: 1090, y: 382 });
-  walkTo(world, { x: 1210, y: 382 });
-  walkTo(world, { x: 1210, y: 700 });
-  walkTo(world, { x: 1222, y: 772 });
-}
-
-export function stageShot(name, world) {
+// Prepare one named scene from a fresh world and return the world's
+// screen afterwards.
+export function prepareShot(name, world) {
   resetWorld(world);
-  if (name === 'route') stageRoute(world);
-  else if (name === 'caught') stageCaught(world);
-  else if (name === 'getaway') stageGetaway(world);
-  else stageCover(world);
+  const thief = world.thief;
+  const mara = world.level.guards[0];
+  const hallCam = world.level.cameras[1];
+
+  if (name === 'rute') {
+    walkTo(world, { x: 700, y: 700 });
+    walkTo(world, { x: 1100, y: 700 });
+    walkTo(world, { x: 1210, y: 640 });
+    walkTo(world, { x: 1210, y: 560 });
+    world.coins = 40;
+    useEmp(world);
+    world.alarm = 12;
+    world.time = 58;
+  } else if (name === 'tertangkap') {
+    walkTo(world, { x: 300, y: 640 });
+    walkTo(world, { x: 700, y: 640 });
+    walkTo(world, { x: 700, y: 300 });
+    placeGuard(mara, 620, 300);
+    pointGuardAt(mara, thief.x, thief.y);
+    mara.flash = 0.3;
+    hallCam.angle = Math.atan2(thief.y - hallCam.y, thief.x - hallCam.x);
+    hallCam.phase = 0;
+    world.alarm = 86;
+    world.time = 73;
+  } else if (name === 'pelarian') {
+    walkTo(world, { x: 300, y: 640 });
+    walkTo(world, { x: 700, y: 640 });
+    walkTo(world, { x: 700, y: 180 });
+    walkTo(world, { x: 930, y: 180 });
+    walkTo(world, { x: 930, y: 382 });
+    walkTo(world, { x: 1090, y: 382 });
+    walkTo(world, { x: 1210, y: 382 });
+    walkTo(world, { x: 1210, y: 700 });
+    walkTo(world, { x: 1222, y: 772 });
+  } else {
+    // sampul (default)
+    walkTo(world, { x: 150, y: 560 });
+    walkTo(world, { x: 300, y: 640 });
+    walkTo(world, { x: 395, y: 500 });
+    walkTo(world, { x: 560, y: 460 });
+    placeGuard(mara, 660, 380);
+    pointGuardAt(mara, thief.x, thief.y);
+    mara.flash = 0.3;
+    hallCam.angle = Math.atan2(thief.y - hallCam.y, thief.x - hallCam.x);
+    hallCam.phase = 0;
+    world.alarm = 34;
+    world.time = 42;
+  }
   return world.screen;
 }

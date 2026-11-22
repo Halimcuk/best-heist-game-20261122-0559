@@ -1,23 +1,58 @@
-// The heist itself: the thief's movement, the guards' patrols, the cameras'
-// sweeps, the alarm meter, the tools and the win / lose conditions.
+// The Midnight Vault — all gameplay logic: thief movement, guard
+// patrols, camera sweeps, detection pressure, the alarm, gadgets,
+// loot, and the win/lose conditions.
+
 import {
-  ALARM_ALERTED, ALARM_BONUS_PER_POINT, ALARM_CAUGHT, ALARM_CAMERA_RATE,
-  ALARM_DECAY_RATE, ALARM_GUARD_RATE, ALARM_SNEAK_FACTOR, ALARM_TOUCH_RATE,
-  CAMERA_CONE_HALF_ANGLE, CAMERA_RANGE, CAMERA_SWEEP_SPEED, DIAMOND_VALUE_SCORE,
-  FLOOR, GEM_VALUE_COINS, GEM_VALUE_SCORE, GUARD_ALERT_SPEED, GUARD_CONE_HALF_ANGLE,
-  GUARD_CONE_RANGE, GUARD_PATROL_SPEED, GUARD_SWEEP_ARC, GUARD_WAYPOINT_PAUSE,
-  START_COINS, STEP, THIEF_RADIUS, THIEF_SNEAK_SPEED, THIEF_WALK_SPEED,
-  TIME_BONUS_CAP_SECONDS, TIME_BONUS_PER_SECOND, TOOL_DECOY_COST,
-  TOOL_DECOY_INVESTIGATE_SECONDS, TOOL_DECOY_RANGE, TOOL_EMP_COST, TOOL_EMP_SECONDS,
-  TOOL_SMOKE_COST, TOOL_SMOKE_RADIUS, TOOL_SMOKE_SECONDS,
+  ALARM_ALERT,
+  ALARM_BONUS_PER_POINT,
+  ALARM_CAMERA_RATE,
+  ALARM_CAUGHT,
+  ALARM_DECAY_RATE,
+  ALARM_GUARD_RATE,
+  ALARM_TOUCH_RATE,
+  ALARM_WARNING,
+  CAMERA_CONE_HALF_ANGLE,
+  CAMERA_RANGE,
+  CAMERA_SWEEP_SPEED,
+  DECOY_COST,
+  DECOY_DURATION,
+  DECOY_INVESTIGATE_DURATION,
+  DECOY_THROW_RANGE,
+  DIAMOND_SCORE_VALUE,
+  EMP_COST,
+  EMP_DURATION,
+  FLOOR,
+  GEM_COIN_VALUE,
+  GEM_SCORE_VALUE,
+  GUARD_ALERT_SPEED,
+  GUARD_CONE_HALF_ANGLE,
+  GUARD_CONE_RANGE,
+  GUARD_PATROL_SPEED,
+  GUARD_RADIUS,
+  GUARD_SWEEP_ARC,
+  GUARD_SWEEP_FREQUENCY,
+  GUARD_WAYPOINT_PAUSE,
+  SMOKE_COST,
+  SMOKE_DURATION,
+  SNEAK_FACTOR,
+  STARTING_COINS,
+  STEP,
+  THIEF_RADIUS,
+  THIEF_SNEAK_SPEED,
+  THIEF_WALK_SPEED,
+  TIME_BONUS_LIMIT,
+  TIME_BONUS_PER_SECOND,
 } from './config.js';
-import { buildLevel, collideCircle, insideVisionCone, lineOfSightClear } from './level.js';
+import { buildLevel, inCone, pushCircleOut, segmentClear } from './level.js';
+import { createRng } from './random.js';
 
 export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
+export const SCREEN_PLAY = 'playing';
+export const SCREEN_PLAYING = 'playing';
 export const SCREEN_WON = 'won';
 export const SCREEN_CAUGHT = 'caught';
 
+// Build a fresh world from one numeric seed (default 1).
 export function createWorld(seed = 1) {
   const level = buildLevel();
   return {
@@ -26,273 +61,300 @@ export function createWorld(seed = 1) {
     level,
     thief: { x: level.start.x, y: level.start.y, angle: 0, sneaking: false },
     alarm: 0,
-    coins: START_COINS,
-    score: 0,
+    coins: STARTING_COINS,
+    _score: 0,
+    get score() { return this._score; },
+    set score(v) { this._score = Math.round(v); },
     lootValue: 0,
     gemsTaken: 0,
     diamondTaken: false,
     time: 0,
-    smoke: 0,
-    emp: 0,
+    smokeLeft: 0,
+    empLeft: 0,
     decoy: null,
     message: '',
-    messageTime: 0,
-    caughtBy: '',
+    messageLeft: 0,
+    caughtReason: '',
     won: false,
-    stats: { timesSeen: 0, toolsUsed: 0 },
+    stats: { spotted: 0, gadgetsUsed: 0, get toolsUsed() { return this.gadgetsUsed; }, set toolsUsed(v) { this.gadgetsUsed = v; }, get timesSeen() { return this.spotted; }, set timesSeen(v) { this.spotted = v; } },
+    wasSeen: false,
+    rng: createRng(seed),
   };
 }
 
+// Rebuild the world from its own seed, switch it to the playing
+// screen, and copy every property onto the existing object.
 export function resetWorld(world) {
   const fresh = createWorld(world.seed);
-  fresh.screen = SCREEN_PLAY;
+  fresh.screen = SCREEN_PLAYING;
   Object.assign(world, fresh);
 }
 
-function clampToFloor(position) {
-  position.x = Math.max(FLOOR.x + 14 + THIEF_RADIUS, Math.min(FLOOR.x + FLOOR.width - 14 - THIEF_RADIUS, position.x));
-  position.y = Math.max(FLOOR.y + 14 + THIEF_RADIUS, Math.min(FLOOR.y + FLOOR.height - 14 - THIEF_RADIUS, position.y));
-}
-
-function moveThief(world, input, dt) {
-  const thief = world.thief;
-  const speed = input.sneak ? THIEF_SNEAK_SPEED : THIEF_WALK_SPEED;
-  thief.sneaking = input.sneak;
-  let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-  let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
-  if (dx !== 0 || dy !== 0) {
-    const length = Math.hypot(dx, dy);
-    thief.x += (dx / length) * speed * dt;
-    thief.y += (dy / length) * speed * dt;
-    thief.angle = Math.atan2(dy, dx);
-  }
-  clampToFloor(thief);
-  collideCircle(thief, THIEF_RADIUS, world.level.solids);
-}
-
-function stepGuard(world, guard, dt) {
-  const alerted = world.alarm >= ALARM_ALERTED;
-  const speed = alerted ? GUARD_ALERT_SPEED : GUARD_PATROL_SPEED;
-  if (guard.investigate) {
-    const target = guard.investigate;
-    const dx = target.x - guard.x;
-    const dy = target.y - guard.y;
-    const distance = Math.hypot(dx, dy);
-    if (distance < 8) {
-      guard.investigateTime -= dt;
-      guard.angle += Math.sin(world.time * 2.2) * 0.02;
-      if (guard.investigateTime <= 0) guard.investigate = null;
-      return;
-    }
-    guard.angle = Math.atan2(dy, dx);
-    guard.x += (dx / distance) * speed * dt;
-    guard.y += (dy / distance) * speed * dt;
-    collideCircle(guard, guard.radius, world.level.solids);
-    return;
-  }
-  if (guard.pause > 0) {
-    guard.pause -= dt;
-    guard.sweepPhase += dt;
-    guard.angle = guard.baseAngle + Math.sin(guard.sweepPhase * 1.6) * GUARD_SWEEP_ARC;
-    return;
-  }
-  const target = guard.waypoints[guard.waypointIndex];
-  const dx = target.x - guard.x;
-  const dy = target.y - guard.y;
-  const distance = Math.hypot(dx, dy);
-  if (distance < 10) {
-    guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
-    guard.pause = GUARD_WAYPOINT_PAUSE;
-    guard.baseAngle = guard.angle;
-    guard.sweepPhase = 0;
-    return;
-  }
-  guard.angle = Math.atan2(dy, dx);
-  guard.x += (dx / distance) * speed * dt;
-  guard.y += (dy / distance) * speed * dt;
-  collideCircle(guard, guard.radius, world.level.solids);
-}
-
-function stepCamera(world, camera, dt) {
-  if (camera.disabled > 0) {
-    camera.disabled -= dt;
-    return;
-  }
-  camera.phase += dt * CAMERA_SWEEP_SPEED;
-  const sweep = (Math.sin(camera.phase) + 1) / 2;
-  camera.angle = camera.sweepFrom + (camera.sweepTo - camera.sweepFrom) * sweep;
-}
-
-function thiefHiddenBySmoke(world) {
-  return world.smoke > 0;
-}
-
-// How much the alarm rises this step; also flashes the watcher that saw the thief.
-function detectionPressure(world, dt) {
-  const thief = world.thief;
-  const hidden = thiefHiddenBySmoke(world);
-  let pressure = 0;
-  if (!hidden) {
-    for (const guard of world.level.guards) {
-      const inCone = insideVisionCone(guard, thief, GUARD_CONE_RANGE, GUARD_CONE_HALF_ANGLE, world.level.solids);
-      const touching = Math.hypot(guard.x - thief.x, guard.y - thief.y) < guard.radius + THIEF_RADIUS + 4;
-      if (inCone || touching) {
-        pressure += touching ? ALARM_TOUCH_RATE : ALARM_GUARD_RATE;
-        guard.seenFlash = 0.25;
-      }
-    }
-    for (const camera of world.level.cameras) {
-      if (camera.disabled > 0) continue;
-      if (insideVisionCone(camera, thief, CAMERA_RANGE, CAMERA_CONE_HALF_ANGLE, world.level.solids)) {
-        pressure += ALARM_CAMERA_RATE;
-        camera.seenFlash = 0.25;
-      }
-    }
-  }
-  return pressure;
-}
-
-function collectLoot(world) {
-  const thief = world.thief;
-  for (const gem of world.level.gems) {
-    if (!gem.taken && Math.hypot(gem.x - thief.x, gem.y - thief.y) < THIEF_RADIUS + 16) {
-      gem.taken = true;
-      world.gemsTaken += 1;
-      world.coins += GEM_VALUE_COINS;
-      world.score += GEM_VALUE_SCORE;
-      world.lootValue += GEM_VALUE_COINS;
-      setMessage(world, `${gem.label} pocketed! +${GEM_VALUE_COINS} coins`);
-    }
-  }
-  const diamond = world.level.diamond;
-  if (!diamond.taken && Math.hypot(diamond.x - thief.x, diamond.y - thief.y) < THIEF_RADIUS + 22) {
-    diamond.taken = true;
-    world.diamondTaken = true;
-    world.score += DIAMOND_VALUE_SCORE;
-    world.lootValue += 500;
-    setMessage(world, 'THE SUNSET DIAMOND IS YOURS — reach the EXIT!');
-  }
-}
-
+// Show a short on-screen message for 3 seconds.
 export function setMessage(world, text) {
   world.message = text;
-  world.messageTime = 3;
+  world.messageLeft = 3;
 }
 
+// Spend coins on a smoke bomb. Returns true when it goes off.
 export function useSmoke(world) {
-  if (world.screen !== SCREEN_PLAY || world.smoke > 0) return false;
-  if (world.coins < TOOL_SMOKE_COST) {
-    setMessage(world, `Smoke bomb costs ${TOOL_SMOKE_COST} coins — grab more loot first`);
+  if (world.screen !== SCREEN_PLAYING) return false;
+  if (world.smokeLeft > 0) return false;
+  if (world.coins < SMOKE_COST) {
+    setMessage(world, `Need ${SMOKE_COST} coins for Smoke — grab some loot first.`);
     return false;
   }
-  world.coins -= TOOL_SMOKE_COST;
-  world.smoke = TOOL_SMOKE_SECONDS;
-  world.stats.toolsUsed += 1;
-  setMessage(world, 'Smoke bomb! You are hidden while the cloud lasts');
+  world.coins -= SMOKE_COST;
+  world.smokeLeft = SMOKE_DURATION;
+  world.stats.gadgetsUsed += 1;
   return true;
 }
 
+// Spend coins on an EMP pulse that kills every camera. Returns true
+// when it goes off.
 export function useEmp(world) {
-  if (world.screen !== SCREEN_PLAY || world.emp > 0) return false;
-  if (world.coins < TOOL_EMP_COST) {
-    setMessage(world, `EMP pulse costs ${TOOL_EMP_COST} coins — grab more loot first`);
+  if (world.screen !== SCREEN_PLAYING) return false;
+  if (world.empLeft > 0) return false;
+  if (world.coins < EMP_COST) {
+    setMessage(world, `Need ${EMP_COST} coins for EMP — grab some loot first.`);
     return false;
   }
-  world.coins -= TOOL_EMP_COST;
-  world.emp = TOOL_EMP_SECONDS;
-  for (const camera of world.level.cameras) camera.disabled = TOOL_EMP_SECONDS;
-  world.stats.toolsUsed += 1;
-  setMessage(world, 'EMP pulse! All cameras offline — move now');
+  world.coins -= EMP_COST;
+  world.empLeft = EMP_DURATION;
+  for (const cam of world.level.cameras) cam.offLeft = EMP_DURATION;
+  world.stats.gadgetsUsed += 1;
   return true;
 }
 
+// Throw a decoy coin at a target point. The nearest guard walks over
+// to investigate it. Returns true when the coin is thrown.
 export function throwDecoy(world, target) {
-  if (world.screen !== SCREEN_PLAY) return false;
-  if (world.coins < TOOL_DECOY_COST) {
-    setMessage(world, `A decoy coin costs ${TOOL_DECOY_COST} coins — grab more loot first`);
+  if (world.screen !== SCREEN_PLAYING) return false;
+  if (world.coins < DECOY_COST) {
+    setMessage(world, `Need ${DECOY_COST} coins for a Decoy — grab some loot first.`);
     return false;
   }
-  const thief = world.thief;
-  if (Math.hypot(target.x - thief.x, target.y - thief.y) > TOOL_DECOY_RANGE) {
-    setMessage(world, 'Too far to throw — get closer first');
+  const dx = target.x - world.thief.x;
+  const dy = target.y - world.thief.y;
+  if (Math.hypot(dx, dy) > DECOY_THROW_RANGE) {
+    setMessage(world, 'Target too far away.');
     return false;
   }
-  world.coins -= TOOL_DECOY_COST;
-  world.decoy = { x: target.x, y: target.y, time: TOOL_DECOY_INVESTIGATE_SECONDS + 1.5 };
+  world.coins -= DECOY_COST;
+  world.decoy = { x: target.x, y: target.y, left: DECOY_DURATION };
   let nearest = null;
-  let nearestDistance = Infinity;
+  let nearestDist = Infinity;
   for (const guard of world.level.guards) {
-    const distance = Math.hypot(guard.x - target.x, guard.y - target.y);
-    if (distance < nearestDistance) {
-      nearestDistance = distance;
+    const d = Math.hypot(guard.x - target.x, guard.y - target.y);
+    if (d < nearestDist) {
+      nearestDist = d;
       nearest = guard;
     }
   }
   if (nearest) {
     nearest.investigate = { x: target.x, y: target.y };
-    nearest.investigateTime = TOOL_DECOY_INVESTIGATE_SECONDS;
+    nearest.investigateLeft = DECOY_INVESTIGATE_DURATION;
   }
-  world.stats.toolsUsed += 1;
-  setMessage(world, 'Decoy coin tossed — a guard goes to check the noise');
+  world.stats.gadgetsUsed += 1;
   return true;
 }
 
-function checkExit(world) {
-  const thief = world.thief;
-  const exit = world.level.exit;
-  if (!world.diamondTaken) return;
-  if (thief.x > exit.x - 10 && thief.y > exit.y - 30) {
-    const timeBonus = Math.max(0, TIME_BONUS_CAP_SECONDS - Math.floor(world.time)) * TIME_BONUS_PER_SECOND;
-    const alarmBonus = Math.max(0, Math.floor(ALARM_CAUGHT - world.alarm)) * ALARM_BONUS_PER_POINT;
-    world.score += timeBonus + alarmBonus;
-    world.screen = SCREEN_WON;
-    world.won = true;
+// Move one guard for a single step.
+function stepGuard(world, guard, dt) {
+  const alertSpeed = world.alarm >= ALARM_ALERT ? GUARD_ALERT_SPEED : GUARD_PATROL_SPEED;
+  if (guard.investigate) {
+    const target = guard.investigate;
+    const dx = target.x - guard.x;
+    const dy = target.y - guard.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 8) {
+      if (guard.investigateLeft >= DECOY_INVESTIGATE_DURATION) {
+        guard.baseAngle = guard.angle;
+      }
+      guard.investigateLeft -= dt;
+      guard.angle = guard.baseAngle + Math.sin(world.time * GUARD_SWEEP_FREQUENCY) * GUARD_SWEEP_ARC;
+      if (guard.investigateLeft <= 0) {
+        guard.investigate = null;
+        guard.investigateLeft = 0;
+      }
+      return;
+    }
+    const step = Math.min(alertSpeed * dt, dist);
+    guard.x += (dx / dist) * step;
+    guard.y += (dy / dist) * step;
+    guard.angle = Math.atan2(dy, dx);
+    return;
   }
+  if (guard.pauseLeft > 0) {
+    guard.pauseLeft -= dt;
+    guard.angle = guard.baseAngle + Math.sin(guard.sweepPhase) * GUARD_SWEEP_ARC;
+    guard.sweepPhase += dt * GUARD_SWEEP_FREQUENCY;
+    return;
+  }
+  const wp = guard.waypoints[guard.waypointIndex];
+  const dx = wp.x - guard.x;
+  const dy = wp.y - guard.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 10) {
+    guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
+    guard.pauseLeft = GUARD_WAYPOINT_PAUSE;
+    guard.baseAngle = guard.angle;
+    guard.sweepPhase = 0;
+    return;
+  }
+  const step = Math.min(alertSpeed * dt, dist);
+  guard.x += (dx / dist) * step;
+  guard.y += (dy / dist) * step;
+  guard.angle = Math.atan2(dy, dx);
 }
 
-// One fixed step of the heist. Returns true while the game is still being played.
-export function stepWorld(world, input, dt = STEP) {
-  if (world.screen !== SCREEN_PLAY) return false;
-  world.time += dt;
-  if (world.messageTime > 0) world.messageTime -= dt;
-  if (world.smoke > 0) world.smoke -= dt;
-  if (world.emp > 0) world.emp -= dt;
-  if (world.decoy) {
-    world.decoy.time -= dt;
-    if (world.decoy.time <= 0) world.decoy = null;
+// Move one camera for a single step.
+function stepCamera(camera, dt) {
+  if (camera.offLeft > 0) {
+    camera.offLeft -= dt;
+    return;
   }
-  for (const guard of world.level.guards) if (guard.seenFlash > 0) guard.seenFlash -= dt;
-  for (const camera of world.level.cameras) if (camera.seenFlash > 0) camera.seenFlash -= dt;
+  camera.phase += dt * CAMERA_SWEEP_SPEED;
+  const t = (Math.sin(camera.phase) + 1) / 2;
+  camera.angle = camera.sweepMin + t * (camera.sweepMax - camera.sweepMin);
+}
 
-  moveThief(world, input, dt);
-  for (const guard of world.level.guards) stepGuard(world, guard, dt);
-  for (const camera of world.level.cameras) stepCamera(world, camera, dt);
+// Run one simulation step. Returns true while the game is still
+// running on the playing screen.
+export function stepWorld(world, input, dt = STEP) {
+  if (world.screen !== SCREEN_PLAYING) return false;
+  const level = world.level;
+  const thief = world.thief;
 
-  const pressure = detectionPressure(world, dt);
-  // Count a spotting event once, when the thief goes from unseen to seen.
-  if (pressure > 0 && !world._wasSeen) world.stats.timesSeen += 1;
-  world._wasSeen = pressure > 0;
+  world.time += dt;
+  if (world.messageLeft > 0) world.messageLeft = Math.max(0, world.messageLeft - dt);
+  if (world.smokeLeft > 0) world.smokeLeft = Math.max(0, world.smokeLeft - dt);
+  if (world.empLeft > 0) world.empLeft = Math.max(0, world.empLeft - dt);
+  if (world.decoy) {
+    world.decoy.left -= dt;
+    if (world.decoy.left <= 0) world.decoy = null;
+  }
+  for (const guard of level.guards) {
+    if (guard.flash > 0) guard.flash = Math.max(0, guard.flash - dt);
+  }
+  for (const cam of level.cameras) {
+    if (cam.flash > 0) cam.flash = Math.max(0, cam.flash - dt);
+  }
+
+  // Move the thief.
+  let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+  thief.sneaking = !!input.sneak;
+  if (dx !== 0 || dy !== 0) {
+    const len = Math.hypot(dx, dy);
+    dx /= len;
+    dy /= len;
+    const speed = thief.sneaking ? THIEF_SNEAK_SPEED : THIEF_WALK_SPEED;
+    thief.x += dx * speed * dt;
+    thief.y += dy * speed * dt;
+    thief.angle = Math.atan2(dy, dx);
+  }
+  const margin = 14 + THIEF_RADIUS;
+  thief.x = Math.max(FLOOR.x + margin, Math.min(FLOOR.x + FLOOR.w - margin, thief.x));
+  thief.y = Math.max(FLOOR.y + margin, Math.min(FLOOR.y + FLOOR.h - margin, thief.y));
+  pushCircleOut(thief, THIEF_RADIUS, level.solids);
+
+  for (const guard of level.guards) stepGuard(world, guard, dt);
+  for (const cam of level.cameras) stepCamera(cam, dt);
+
+  // Work out detection pressure.
+  const hidden = world.smokeLeft > 0;
+  let seenByGuard = false;
+  let seenByCamera = false;
+  let touched = false;
+  if (!hidden) {
+    for (const guard of level.guards) {
+      const d = Math.hypot(thief.x - guard.x, thief.y - guard.y);
+      if (d < GUARD_RADIUS + THIEF_RADIUS + 4) touched = true;
+      if (inCone(guard, thief, GUARD_CONE_RANGE, GUARD_CONE_HALF_ANGLE, level.solids)) {
+        seenByGuard = true;
+        guard.flash = 0.25;
+      }
+    }
+    for (const cam of level.cameras) {
+      if (cam.offLeft > 0) continue;
+      if (inCone(cam, thief, CAMERA_RANGE, CAMERA_CONE_HALF_ANGLE, level.solids)) {
+        seenByCamera = true;
+        cam.flash = 0.25;
+      }
+    }
+  }
+  const seen = seenByGuard || seenByCamera || touched;
+  if (seen && !world.wasSeen) world.stats.spotted += 1;
+  world.wasSeen = seen;
+
+  let pressure = 0;
+  if (touched) pressure = ALARM_TOUCH_RATE;
+  else if (seenByGuard) pressure = ALARM_GUARD_RATE;
+  else if (seenByCamera) pressure = ALARM_CAMERA_RATE;
+  if (pressure > 0 && thief.sneaking) pressure *= SNEAK_FACTOR;
+
   if (pressure > 0) {
-    world.alarm += pressure * (world.thief.sneaking ? ALARM_SNEAK_FACTOR : 1) * dt;
+    world.alarm = Math.min(ALARM_CAUGHT, world.alarm + pressure * dt);
   } else {
     world.alarm = Math.max(0, world.alarm - ALARM_DECAY_RATE * dt);
   }
+
+  // Defeat.
   if (world.alarm >= ALARM_CAUGHT) {
-    world.alarm = ALARM_CAUGHT;
     world.screen = SCREEN_CAUGHT;
-    world.caughtBy = pressure >= ALARM_TOUCH_RATE ? 'caught red-handed by a guard' : 'spotted — the alarm hit 100%';
+    world.won = false;
+    world.caughtReason =
+      pressure >= ALARM_TOUCH_RATE
+        ? 'Caught red-handed by a guard!'
+        : 'Spotted — the alarm hit 100%.';
     return false;
   }
 
-  collectLoot(world);
-  checkExit(world);
-  return world.screen === SCREEN_PLAY;
+  // Collect gems.
+  for (const gem of level.gems) {
+    if (gem.taken) continue;
+    if (Math.hypot(thief.x - gem.x, thief.y - gem.y) < THIEF_RADIUS + 16) {
+      gem.taken = true;
+      world.gemsTaken += 1;
+      world.coins += GEM_COIN_VALUE;
+      world.score += GEM_SCORE_VALUE;
+      world.lootValue += 10;
+      setMessage(world, `${gem.name} +${GEM_COIN_VALUE} coins!`);
+    }
+  }
+
+  // Collect the Sunset Diamond.
+  const diamond = level.diamond;
+  if (!diamond.taken && Math.hypot(thief.x - diamond.x, thief.y - diamond.y) < THIEF_RADIUS + 22) {
+    diamond.taken = true;
+    world.diamondTaken = true;
+    world.score += DIAMOND_SCORE_VALUE;
+    world.lootValue += 500;
+    setMessage(world, 'Sunset Diamond secured — get to the EXIT!');
+  }
+
+  // Win: reach the exit after taking the diamond.
+  const exit = level.exit;
+  if (world.diamondTaken && thief.x > exit.x - 10 && thief.y > exit.y - 30) {
+    const timeBonus = Math.max(0, TIME_BONUS_LIMIT - world.time) * TIME_BONUS_PER_SECOND;
+    const alarmBonus = Math.max(0, ALARM_CAUGHT - world.alarm) * ALARM_BONUS_PER_POINT;
+    world.score += timeBonus + alarmBonus;
+    world.screen = SCREEN_WON;
+    world.won = true;
+    return false;
+  }
+
+  return world.screen === SCREEN_PLAYING;
 }
 
+// The world's final score.
 export function finalScore(world) {
   return world.score;
 }
 
-export function lineOfSight(world, ax, ay, bx, by) {
-  return lineOfSightClear(ax, ay, bx, by, world.level.solids);
+// True when the line between two points is not blocked by any solid
+// in this world's level.
+export function hasLineOfSight(world, x1, y1, x2, y2) {
+  return segmentClear(x1, y1, x2, y2, world.level.solids);
 }
